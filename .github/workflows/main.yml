@@ -12,4 +12,4 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: ControlTV_APK
-          path: build/apk/app-release-unsigned.apk
+          path: build/apk/*.apk

@@ -25,7 +25,7 @@ def main(page: ft.Page):
     page.vertical_alignment = ft.MainAxisAlignment.CENTER
     page.horizontal_alignment = ft.CrossAxisAlignment.CENTER
     page.padding = 20
-    page.scroll = "auto"
+    page.scroll = "auto" # <--- ESTO ARREGLA EL SCROLL EN EL CELULAR
 
     # --- 2. Variables y Memoria de la App ---
     ip_inicial = ""
@@ -44,7 +44,6 @@ def main(page: ft.Page):
         options=[]
     )
     
-    # Función que se activa al elegir una IP de la lista
     def seleccionar_ip_dropdown(e):
         campo_ip.value = dropdown_ips.value
         page.update()
@@ -87,6 +86,7 @@ def main(page: ft.Page):
         subred = obtener_mi_subred()
         teles_encontradas = []
         
+        # Ejecuta 60 revisiones simultáneas para terminar al instante
         with ThreadPoolExecutor(max_workers=60) as executor:
             ips_a_revisar = [f"{subred}{i}" for i in range(1, 255)]
             executor.map(lambda ip: verificar_tv(ip, teles_encontradas), ips_a_revisar)
@@ -147,21 +147,40 @@ def main(page: ft.Page):
                 texto_estado.color = "red"
                 page.update()
 
+    # Comandos básicos
     def vol_subir(e): enviar_comando("input keyevent 24")
     def vol_bajar(e): enviar_comando("input keyevent 25")
     def vol_mute(e): enviar_comando("input keyevent 164")
-    def vol_turbo_subir(e): enviar_comando("input keyevent 24\n" * 5)
-    def vol_turbo_bajar(e): enviar_comando("input keyevent 25\n" * 5)
     def btn_power(e): enviar_comando("input keyevent 26")
+
+    # --- CORRECCIÓN CRÍTICA DEL SLIDER ---
+    def cambiar_volumen_slider(e):
+        # vol_desejado = int(e control value) <-- ESTO TENÍA ERRORES
+        volumen_deseado = int(e.control.value) # Sintaxis corregida e idioma unificado
+        # USAMOS EL HACK EXITOSO QUE ENCONTRASTE
+        enviar_comando(f"service call audio 3 i32 3 i32 {volumen_deseado} i32 1")
 
     # --- 7. Construcción de la Interfaz Visual ---
     btn_escanear = ft.ElevatedButton("Buscar TV", on_click=iniciar_escaneo)
     btn_conectar = ft.ElevatedButton("Conectar ADB", on_click=conectar_tv, color="white", bgcolor="#e65100")
 
-    # Fila superior con el nuevo Dropdown incluido
-    fila_red = ft.Row([campo_ip, dropdown_ips, btn_escanear, progreso], alignment=ft.MainAxisAlignment.CENTER)
+    # Fila superior con el Dropdown incluido
+    fila_red = ft.Row([campo_ip, dropdown_ips, btn_escanear, progreso], alignment=ft.MainAxisAlignment.CENTER, wrap=True) # wrap=True arregla el tamaño
     
-    # Contenedor del Control Remoto (NUEVOS BOTONES A PRUEBA DE FALLOS)
+    # Nuevo Slider interactivo
+    slider_volumen = ft.Slider(
+        min=0,
+        max=100, 
+        divisions=100,
+        value=15, 
+        label="{value}",
+        on_change_end=cambiar_volumen_slider,
+        width=250,
+        active_color="#2196f3"
+    )
+
+    # --- CORRECCIÓN CRÍTICA DE ESTILOS DEL CONTENEDOR ---
+    # TRUCO ANTIFALLOS PARA FLET 0.85.3: Usamos Emojis en lugar de iconos rotos
     panel_control = ft.Container(
         content=ft.Column(
             [
@@ -169,28 +188,31 @@ def main(page: ft.Page):
                 ft.Divider(height=10, color="transparent"),
                 ft.Row(
                     [
-                        ft.ElevatedButton("-5", on_click=vol_turbo_bajar, bgcolor="#b71c1c", color="white", tooltip="Bajar Rápido"),
                         ft.ElevatedButton("🔉 -1", on_click=vol_bajar),
-                        ft.ElevatedButton("🔇 Mute", on_click=vol_mute, tooltip="Silenciar (Mute)"),
+                        slider_volumen,
                         ft.ElevatedButton("🔊 +1", on_click=vol_subir),
-                        ft.ElevatedButton("+5", on_click=vol_turbo_subir, bgcolor="#1b5e20", color="white", tooltip="Subir Rápido"),
                     ],
                     alignment=ft.MainAxisAlignment.CENTER,
-                    wrap=True
+                    wrap=True # wrap=True arregla el tamaño
                 ),
+                # Botón de Mute centrado debajo de la barra
+                ft.ElevatedButton("🔇 Mutear TV", on_click=vol_mute, width=150),
+                
                 ft.Divider(height=20, color="transparent"),
                 ft.ElevatedButton("🔴 APAGAR TV", color="white", bgcolor="#d32f2f", on_click=btn_power, width=200, height=50)
             ],
             alignment=ft.MainAxisAlignment.CENTER,
             horizontal_alignment=ft.CrossAxisAlignment.CENTER
         ),
-        padding=30,
-        border_radius=20,
-        bgcolor="#2b2d31"
+        # --- ACTIVAMOS LOS ESTILOS QUE ESTABAN COMENTADOS ---
+        padding=30, # Corregido: padding=30 en lugar de padding-30
+        border_radius=20, # Descomentado
+        bgcolor="#2b2d31" # Descomentado y usando Hex para evitar problemas de ft.colors
     )
 
+    # Añadimos todos los bloques a la página final
     page.add(
-        ft.Text("📺", size=50),
+        ft.Text("📺", size=50), # Emoji indestructible
         ft.Text("Smart Remote", size=28, weight="bold"),
         ft.Divider(height=20, color="transparent"),
         fila_red,

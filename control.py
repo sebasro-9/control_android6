@@ -25,6 +25,7 @@ def main(page: ft.Page):
     page.vertical_alignment = ft.MainAxisAlignment.CENTER
     page.horizontal_alignment = ft.CrossAxisAlignment.CENTER
     page.padding = 20
+    page.scroll = "auto"
 
     # --- 2. Variables y Memoria de la App ---
     ip_inicial = ""
@@ -174,7 +175,8 @@ def main(page: ft.Page):
                         ft.ElevatedButton("🔊 +1", on_click=vol_subir),
                         ft.ElevatedButton("+5", on_click=vol_turbo_subir, bgcolor="#1b5e20", color="white", tooltip="Subir Rápido"),
                     ],
-                    alignment=ft.MainAxisAlignment.CENTER
+                    alignment=ft.MainAxisAlignment.CENTER,
+                    wrap=True
                 ),
                 ft.Divider(height=20, color="transparent"),
                 ft.ElevatedButton("🔴 APAGAR TV", color="white", bgcolor="#d32f2f", on_click=btn_power, width=200, height=50)

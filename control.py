@@ -25,7 +25,7 @@ def main(page: ft.Page):
     page.vertical_alignment = ft.MainAxisAlignment.CENTER
     page.horizontal_alignment = ft.CrossAxisAlignment.CENTER
     page.padding = 20
-    page.scroll = "auto" # <--- ESTO ARREGLA EL SCROLL EN EL CELULAR
+    page.scroll = "auto" # Habilita deslizamiento vertical en el celular
 
     # --- 2. Variables y Memoria de la App ---
     ip_inicial = ""
@@ -36,7 +36,6 @@ def main(page: ft.Page):
     # --- 3. Componentes Visuales Superiores ---
     campo_ip = ft.TextField(label="IP de la TV", value=ip_inicial, width=180)
     
-    # Nuevo: Menú desplegable para múltiples TVs
     dropdown_ips = ft.Dropdown(
         label="Elige tu TV",
         width=150,
@@ -80,13 +79,12 @@ def main(page: ft.Page):
         progreso.visible = True
         texto_estado.value = "Escaneando red local..."
         texto_estado.color = "orange"
-        dropdown_ips.visible = False # Ocultamos la lista por si estaba abierta
+        dropdown_ips.visible = False
         page.update()
         
         subred = obtener_mi_subred()
         teles_encontradas = []
         
-        # Ejecuta 60 revisiones simultáneas para terminar al instante
         with ThreadPoolExecutor(max_workers=60) as executor:
             ips_a_revisar = [f"{subred}{i}" for i in range(1, 255)]
             executor.map(lambda ip: verificar_tv(ip, teles_encontradas), ips_a_revisar)
@@ -102,7 +100,6 @@ def main(page: ft.Page):
             texto_estado.value = f"¡TV encontrada en {teles_encontradas[0]}!"
             texto_estado.color = "green"
         else:
-            # MAGIA: Si encuentra más de 1, mostramos la lista desplegable
             campo_ip.value = teles_encontradas[0]
             dropdown_ips.options = [ft.dropdown.Option(ip) for ip in teles_encontradas]
             dropdown_ips.value = teles_encontradas[0]
@@ -147,78 +144,99 @@ def main(page: ft.Page):
                 texto_estado.color = "red"
                 page.update()
 
-    # Comandos básicos
+    # Comandos de Audio
     def vol_subir(e): enviar_comando("input keyevent 24")
     def vol_bajar(e): enviar_comando("input keyevent 25")
     def vol_mute(e): enviar_comando("input keyevent 164")
-    def btn_power(e): enviar_comando("input keyevent 26")
-
-    # --- CORRECCIÓN CRÍTICA DEL SLIDER ---
     def cambiar_volumen_slider(e):
-        # vol_desejado = int(e control value) <-- ESTO TENÍA ERRORES
-        volumen_deseado = int(e.control.value) # Sintaxis corregida e idioma unificado
-        # USAMOS EL HACK EXITOSO QUE ENCONTRASTE
+        volumen_deseado = int(e.control.value)
         enviar_comando(f"service call audio 3 i32 3 i32 {volumen_deseado} i32 1")
+
+    # Comandos ADB de Navegación del Sistema (D-Pad)
+    def nav_arriba(e): enviar_comando("input keyevent 19")
+    def nav_abajo(e): enviar_comando("input keyevent 20")
+    def nav_izquierda(e): enviar_comando("input keyevent 21")
+    def nav_derecha(e): enviar_comando("input keyevent 22")
+    def nav_ok(e): enviar_comando("input keyevent 23")
+    def nav_atras(e): enviar_comando("input keyevent 4") # Botón Back/Atrás
 
     # --- 7. Construcción de la Interfaz Visual ---
     btn_escanear = ft.ElevatedButton("Buscar TV", on_click=iniciar_escaneo)
     btn_conectar = ft.ElevatedButton("Conectar ADB", on_click=conectar_tv, color="white", bgcolor="#e65100")
 
-    # Fila superior con el Dropdown incluido
-    fila_red = ft.Row([campo_ip, dropdown_ips, btn_escanear, progreso], alignment=ft.MainAxisAlignment.CENTER, wrap=True) # wrap=True arregla el tamaño
+    fila_red = ft.Row([campo_ip, dropdown_ips, btn_escanear, progreso], alignment=ft.MainAxisAlignment.CENTER, wrap=True)
     
-    # Nuevo Slider interactivo
     slider_volumen = ft.Slider(
-        min=0,
-        max=100, 
-        divisions=100,
-        value=15, 
-        label="{value}",
-        on_change_end=cambiar_volumen_slider,
-        width=250,
-        active_color="#2196f3"
+        min=0, max=100, divisions=100, value=15, 
+        label="{value}", on_change_end=cambiar_volumen_slider,
+        width=200, active_color="#2196f3"
     )
 
-    # --- CORRECCIÓN CRÍTICA DE ESTILOS DEL CONTENEDOR ---
-    # TRUCO ANTIFALLOS PARA FLET 0.85.3: Usamos Emojis en lugar de iconos rotos
-    panel_control = ft.Container(
+    # Panel 1: Audio (Sin botón de energía)
+    panel_volumen = ft.Container(
         content=ft.Column(
             [
-                ft.Text("CONTROL DE VOLUMEN", size=18, weight="bold", color="white70"),
-                ft.Divider(height=10, color="transparent"),
+                ft.Text("CONTROL DE VOLUMEN", size=16, weight="bold", color="white70"),
+                ft.Divider(height=5, color="transparent"),
                 ft.Row(
                     [
                         ft.ElevatedButton("🔉 -1", on_click=vol_bajar),
                         slider_volumen,
                         ft.ElevatedButton("🔊 +1", on_click=vol_subir),
                     ],
-                    alignment=ft.MainAxisAlignment.CENTER,
-                    wrap=True # wrap=True arregla el tamaño
+                    alignment=ft.MainAxisAlignment.CENTER, wrap=True
                 ),
-                # Botón de Mute centrado debajo de la barra
-                ft.ElevatedButton("🔇 Mutear TV", on_click=vol_mute, width=150),
-                
-                ft.Divider(height=20, color="transparent"),
-                ft.ElevatedButton("🔴 APAGAR TV", color="white", bgcolor="#d32f2f", on_click=btn_power, width=200, height=50)
+                ft.ElevatedButton("🔇 Mutear TV", on_click=vol_mute, width=140)
             ],
-            alignment=ft.MainAxisAlignment.CENTER,
-            horizontal_alignment=ft.CrossAxisAlignment.CENTER
+            alignment=ft.MainAxisAlignment.CENTER, horizontal_alignment=ft.CrossAxisAlignment.CENTER
         ),
-        # --- ACTIVAMOS LOS ESTILOS QUE ESTABAN COMENTADOS ---
-        padding=30, # Corregido: padding=30 en lugar de padding-30
-        border_radius=20, # Descomentado
-        bgcolor="#2b2d31" # Descomentado y usando Hex para evitar problemas de ft.colors
+        padding=20, border_radius=20, bgcolor="#2b2d31"
     )
 
-    # Añadimos todos los bloques a la página final
+    # Panel 2: Cruceta de Navegación del Menú (D-Pad)
+    panel_navegacion = ft.Container(
+        content=ft.Column(
+            [
+                ft.Text("NAVEGACIÓN DE MENÚ", size=16, weight="bold", color="white70"),
+                ft.Divider(height=10, color="transparent"),
+                
+                # Fila de Arriba
+                ft.Row([ft.ElevatedButton("🔼", on_click=nav_arriba, width=65, height=50)], alignment=ft.MainAxisAlignment.CENTER),
+                
+                # Fila Central (Izquierda, OK, Derecha)
+                ft.Row(
+                    [
+                        ft.ElevatedButton("◀️", on_click=nav_izquierda, width=65, height=50),
+                        ft.ElevatedButton("OK", on_click=nav_ok, width=80, height=50, bgcolor="#2196f3", color="white"),
+                        ft.ElevatedButton("▶️", on_click=nav_derecha, width=65, height=50),
+                    ],
+                    alignment=ft.MainAxisAlignment.CENTER
+                ),
+                
+                # Fila de Abajo
+                ft.Row([ft.ElevatedButton("🔽", on_click=nav_abajo, width=65, height=50)], alignment=ft.MainAxisAlignment.CENTER),
+                
+                ft.Divider(height=10, color="transparent"),
+                # Botón de escape/atrás imprescindible para menús
+                ft.ElevatedButton("↩️ Volver / Atrás", on_click=nav_atras, width=160, height=40, bgcolor="#455a64", color="white")
+            ],
+            alignment=ft.MainAxisAlignment.CENTER, horizontal_alignment=ft.CrossAxisAlignment.CENTER
+        ),
+        padding=20, border_radius=20, bgcolor="#2b2d31"
+    )
+
+    # Añadimos la interfaz completa a la pantalla
     page.add(
-        ft.Text("📺", size=50), # Emoji indestructible
+        ft.Text("📺", size=50),
         ft.Text("Smart Remote", size=28, weight="bold"),
-        ft.Divider(height=20, color="transparent"),
+        ft.Divider(height=15, color="transparent"),
         fila_red,
         btn_conectar,
         texto_estado,
-        panel_control
+        ft.Divider(height=15, color="transparent"),
+        panel_volumen,
+        ft.Divider(height=15, color="transparent"),
+        panel_navegacion
     )
 
 ft.app(target=main)

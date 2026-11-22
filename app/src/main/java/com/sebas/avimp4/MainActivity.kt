@@ -14,8 +14,8 @@ import android.widget.Button
 import android.widget.ProgressBar
 import android.widget.TextView
 import androidx.activity.ComponentActivity
-import androidx.annotation.OptIn
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.OptIn
 import androidx.core.content.IntentCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
@@ -41,8 +41,11 @@ class MainActivity : ComponentActivity() {
     private var fallidos = 0
     private var ocupado = false
     private val registro = StringBuilder()
+    private var nombreActual = ""
 
     private var transformer: Transformer? = null
+    @Volatile private var proceso: Process? = null
+    @Volatile private var destruida = false
     private val holder = ProgressHolder()
     private val handler = Handler(Looper.getMainLooper())
     private val io = Executors.newSingleThreadExecutor()
@@ -102,29 +105,36 @@ class MainActivity : ComponentActivity() {
         if (!ocupado) siguiente()
     }
 
+    private fun mostrar(paso: String) {
+        estado.text = "Convirtiendo ${hechos + fallidos + 1} de $total\n$nombreActual\n$paso\n\n$registro"
+    }
+
     private fun siguiente() {
-        val uri = cola.removeFirstOrNull()
-        if (uri == null) {
-            terminar()
-            return
-        }
+        if (destruida) return
+        val uri = cola.removeFirstOrNull() ?: return terminar()
         ocupado = true
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         val nombre = nombreDe(uri)
         val salida = nombre.substringBeforeLast('.', nombre) + ".mp4"
-        val tmp = File(cacheDir, "conv_${System.currentTimeMillis()}.mp4")
-        estado.text = "Convirtiendo ${hechos + fallidos + 1} de $total\n$nombre\n\n$registro"
+        nombreActual = nombre
+        mostrar("Convirtiendo con el hardware del teléfono…")
         barra.progress = 0
+        media3(
+            MediaItem.fromUri(uri),
+            ok = { tmp -> guardar(tmp, salida, nombre) },
+            error = { e -> rutaFFmpeg(uri, nombre, salida, e) }
+        )
+    }
 
+    private fun media3(item: MediaItem, ok: (File) -> Unit, error: (String) -> Unit) {
+        val tmp = File(cacheDir, "m3_${System.nanoTime()}.mp4")
         val t = Transformer.Builder(this)
             .setVideoMimeType(MimeTypes.VIDEO_H264)
             .setAudioMimeType(MimeTypes.AUDIO_AAC)
             .addListener(object : Transformer.Listener {
                 override fun onCompleted(composition: Composition, exportResult: ExportResult) {
                     transformer = null
-                    barra.progress = 100
-                    estado.text = "Guardando $salida…\n\n$registro"
-                    guardar(tmp, salida, nombre)
+                    ok(tmp)
                 }
 
                 override fun onError(
@@ -134,26 +144,115 @@ class MainActivity : ComponentActivity() {
                 ) {
                     transformer = null
                     tmp.delete()
-                    fallidos++
-                    registro.append("✗ $nombre\n   ${exportException.errorCodeName}\n")
-                    siguiente()
+                    error(exportException.errorCodeName)
                 }
             })
             .build()
-
         transformer = t
         try {
-            t.start(MediaItem.fromUri(uri), tmp.absolutePath)
+            t.start(item, tmp.absolutePath)
             handler.post(progreso)
         } catch (e: Exception) {
             transformer = null
-            fallidos++
-            registro.append("✗ $nombre\n   ${e.message}\n")
-            siguiente()
+            tmp.delete()
+            error(e.message ?: e.javaClass.simpleName)
         }
     }
 
+    private fun rutaFFmpeg(uri: Uri, nombre: String, salida: String, errorMedia3: String) {
+        mostrar("Formato antiguo: paso 1/2 con FFmpeg…")
+        barra.progress = 0
+        io.execute {
+            val entrada = File(cacheDir, "in_${System.nanoTime()}")
+            val intermedio = File(cacheDir, "ff_${System.nanoTime()}.mp4")
+            val resultado = runCatching {
+                contentResolver.openInputStream(uri).use { i ->
+                    requireNotNull(i) { "No se pudo leer el archivo" }
+                    entrada.outputStream().use { i.copyTo(it, 1 shl 20) }
+                }
+                ejecutarFFmpeg(entrada, intermedio)
+            }
+            entrada.delete()
+            runOnUiThread {
+                if (destruida) {
+                    intermedio.delete()
+                    return@runOnUiThread
+                }
+                val err = resultado.exceptionOrNull()
+                if (err != null) {
+                    intermedio.delete()
+                    fallo(nombre, "$errorMedia3\n   FFmpeg: ${err.message}")
+                    return@runOnUiThread
+                }
+                mostrar("Paso 2/2: pasando a H.264…")
+                barra.progress = 0
+                media3(
+                    MediaItem.fromUri(Uri.fromFile(intermedio)),
+                    ok = { tmp ->
+                        intermedio.delete()
+                        guardar(tmp, salida, nombre)
+                    },
+                    error = { guardar(intermedio, salida, nombre) }
+                )
+            }
+        }
+    }
+
+    private fun ejecutarFFmpeg(entrada: File, salida: File) {
+        val bin = File(applicationInfo.nativeLibraryDir, "libffmpeg.so")
+        check(bin.exists()) { "FFmpeg no disponible para este procesador" }
+        val cmd = listOf(
+            bin.absolutePath, "-hide_banner", "-nostdin", "-y",
+            "-i", entrada.absolutePath,
+            "-map", "0:v:0", "-map", "0:a:0?",
+            "-c:v", "mpeg4", "-q:v", "2", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "192k", "-ac", "2",
+            "-progress", "pipe:1", "-nostats",
+            salida.absolutePath
+        )
+        val p = ProcessBuilder(cmd).redirectErrorStream(true).start()
+        proceso = p
+        val ultimas = ArrayDeque<String>()
+        val claveValor = Regex("^[a-z_0-9]+=.*")
+        val duracion = Regex("Duration: (\\d+):(\\d+):(\\d+(?:\\.\\d+)?)")
+        var durUs = 0L
+        p.inputStream.bufferedReader().forEachLine { l ->
+            if (l.startsWith("out_time_us=")) {
+                val t = l.substringAfter('=').toLongOrNull() ?: 0L
+                if (durUs > 0) {
+                    val pct = (t * 100 / durUs).toInt().coerceIn(0, 100)
+                    runOnUiThread { barra.progress = pct }
+                }
+            } else if (!claveValor.matches(l)) {
+                if (durUs == 0L) {
+                    duracion.find(l)?.let { m ->
+                        val (h, mi, s) = m.destructured
+                        durUs = ((h.toLong() * 3600 + mi.toLong() * 60) * 1_000_000L +
+                                (s.toDouble() * 1_000_000).toLong())
+                    }
+                }
+                if (l.isNotBlank()) {
+                    ultimas.addLast(l.trim())
+                    if (ultimas.size > 4) ultimas.removeFirst()
+                }
+            }
+        }
+        val codigo = p.waitFor()
+        proceso = null
+        if (codigo != 0 || !salida.exists() || salida.length() == 0L) {
+            throw RuntimeException(ultimas.joinToString("\n   ").ifBlank { "código $codigo" })
+        }
+    }
+
+    private fun fallo(nombre: String, msg: String) {
+        fallidos++
+        registro.append("✗ $nombre\n   $msg\n")
+        siguiente()
+    }
+
     private fun guardar(tmp: File, salida: String, original: String) {
+        barra.progress = 100
+        mostrar("Guardando $salida…")
         io.execute {
             val error = runCatching { copiarAGaleria(tmp, salida) }.exceptionOrNull()
             tmp.delete()
@@ -161,11 +260,10 @@ class MainActivity : ComponentActivity() {
                 if (error == null) {
                     hechos++
                     registro.append("✓ $salida\n")
+                    siguiente()
                 } else {
-                    fallidos++
-                    registro.append("✗ $original\n   No se pudo guardar: ${error.message}\n")
+                    fallo(original, "No se pudo guardar: ${error.message}")
                 }
-                siguiente()
             }
         }
     }
@@ -219,8 +317,10 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        destruida = true
         handler.removeCallbacks(progreso)
         transformer?.cancel()
+        proceso?.destroy()
         io.shutdown()
         super.onDestroy()
     }

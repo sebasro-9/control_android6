@@ -1,0 +1,5 @@
+ffmpeg-out/
+app/src/main/jniLibs/
+build/
+app/build/
+.gradle/

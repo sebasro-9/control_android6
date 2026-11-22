@@ -15,10 +15,46 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+
+      - name: Caché de FFmpeg
+        id: cache-ffmpeg
+        uses: actions/cache@v4
+        with:
+          path: ffmpeg-out
+          key: ffmpeg-${{ hashFiles('scripts/compilar_ffmpeg.sh') }}
+
+      - name: Compilar FFmpeg para Android
+        if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
+        run: |
+          set -o pipefail
+          bash scripts/compilar_ffmpeg.sh 2>&1 | tee ffmpeg.log
+
+      - name: Copiar FFmpeg a la app
+        run: |
+          mkdir -p app/src/main/jniLibs
+          cp -r ffmpeg-out/* app/src/main/jniLibs/
+          ls -laR app/src/main/jniLibs
+
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.11.1'
-      - run: gradle assembleRelease --no-daemon --stacktrace
+
+      - name: Compilar APK
+        run: |
+          set -o pipefail
+          gradle assembleRelease --no-daemon --stacktrace 2>&1 | tee gradle.log
+
+      - name: Mostrar error
+        if: failure()
+        run: |
+          for f in ffmpeg.log gradle.log; do
+            [ -f "$f" ] || continue
+            msg=$(grep -iE "error|fail|undefined|not found" "$f" | tail -40)
+            [ -z "$msg" ] && msg=$(tail -40 "$f")
+            msg="${msg//'%'/'%25'}"; msg="${msg//$'\n'/'%0A'}"; msg="${msg//$'\r'/'%0D'}"
+            echo "::error title=$f::$msg"
+          done
+
       - run: cp app/build/outputs/apk/release/app-release.apk AVI-a-MP4.apk
       - uses: actions/upload-artifact@v4
         with:

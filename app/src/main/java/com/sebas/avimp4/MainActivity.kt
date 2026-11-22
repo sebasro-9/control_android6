@@ -7,6 +7,7 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.view.WindowManager
@@ -27,6 +28,7 @@ import androidx.media3.transformer.ProgressHolder
 import androidx.media3.transformer.Transformer
 import java.io.File
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicLong
 
 @OptIn(UnstableApi::class)
 class MainActivity : ComponentActivity() {
@@ -34,6 +36,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var estado: TextView
     private lateinit var barra: ProgressBar
     private lateinit var boton: Button
+    private lateinit var saltarBtn: Button
 
     private val cola = ArrayDeque<Uri>()
     private var total = 0
@@ -44,6 +47,12 @@ class MainActivity : ComponentActivity() {
     private var nombreActual = ""
 
     private var transformer: Transformer? = null
+    private var alFallar: ((String) -> Unit)? = null
+    private var tmpActual: File? = null
+    private var ultimoAvance = 0L
+    private var ultimoProgreso = -1
+    private var ultimoTam = -1L
+    @Volatile private var saltado = false
     @Volatile private var proceso: Process? = null
     @Volatile private var destruida = false
     private val holder = ProgressHolder()
@@ -58,10 +67,27 @@ class MainActivity : ComponentActivity() {
     private val progreso = object : Runnable {
         override fun run() {
             val t = transformer ?: return
-            if (t.getProgress(holder) == Transformer.PROGRESS_STATE_AVAILABLE) {
+            var avanzo = false
+            if (t.getProgress(holder) == Transformer.PROGRESS_STATE_AVAILABLE &&
+                holder.progress != ultimoProgreso
+            ) {
+                ultimoProgreso = holder.progress
                 barra.progress = holder.progress
+                avanzo = true
             }
-            handler.postDelayed(this, 400)
+            val tam = tmpActual?.length() ?: 0L
+            if (tam != ultimoTam) {
+                ultimoTam = tam
+                avanzo = true
+            }
+            val ahora = SystemClock.elapsedRealtime()
+            if (avanzo) {
+                ultimoAvance = ahora
+            } else if (ahora - ultimoAvance > 30_000) {
+                abortarMedia3("se trabó (30 s sin avanzar)")
+                return
+            }
+            handler.postDelayed(this, 500)
         }
     }
 
@@ -71,7 +97,9 @@ class MainActivity : ComponentActivity() {
         estado = findViewById(R.id.estado)
         barra = findViewById(R.id.barra)
         boton = findViewById(R.id.boton)
+        saltarBtn = findViewById(R.id.saltar)
         boton.setOnClickListener { elegir.launch(arrayOf("video/*")) }
+        saltarBtn.setOnClickListener { saltar() }
         if (savedInstanceState == null) manejarIntent(intent)
     }
 
@@ -113,6 +141,8 @@ class MainActivity : ComponentActivity() {
         if (destruida) return
         val uri = cola.removeFirstOrNull() ?: return terminar()
         ocupado = true
+        saltado = false
+        saltarBtn.visibility = android.view.View.VISIBLE
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         val nombre = nombreDe(uri)
         val salida = nombre.substringBeforeLast('.', nombre) + ".mp4"
@@ -128,12 +158,14 @@ class MainActivity : ComponentActivity() {
 
     private fun media3(item: MediaItem, ok: (File) -> Unit, error: (String) -> Unit) {
         val tmp = File(cacheDir, "m3_${System.nanoTime()}.mp4")
+        val ref = java.util.concurrent.atomic.AtomicReference<Transformer>()
         val t = Transformer.Builder(this)
             .setVideoMimeType(MimeTypes.VIDEO_H264)
             .setAudioMimeType(MimeTypes.AUDIO_AAC)
             .addListener(object : Transformer.Listener {
                 override fun onCompleted(composition: Composition, exportResult: ExportResult) {
-                    transformer = null
+                    if (transformer !== ref.get()) return
+                    limpiarMedia3()
                     ok(tmp)
                 }
 
@@ -142,21 +174,61 @@ class MainActivity : ComponentActivity() {
                     exportResult: ExportResult,
                     exportException: ExportException
                 ) {
-                    transformer = null
+                    if (transformer !== ref.get()) return
+                    limpiarMedia3()
                     tmp.delete()
                     error(exportException.errorCodeName)
                 }
             })
             .build()
+        ref.set(t)
         transformer = t
+        tmpActual = tmp
+        alFallar = error
+        ultimoProgreso = -1
+        ultimoTam = -1L
+        ultimoAvance = SystemClock.elapsedRealtime()
         try {
             t.start(item, tmp.absolutePath)
+            handler.removeCallbacks(progreso)
             handler.post(progreso)
         } catch (e: Exception) {
-            transformer = null
+            limpiarMedia3()
             tmp.delete()
             error(e.message ?: e.javaClass.simpleName)
         }
+    }
+
+    private fun limpiarMedia3() {
+        handler.removeCallbacks(progreso)
+        transformer = null
+        alFallar = null
+        tmpActual = null
+    }
+
+    private fun abortarMedia3(motivo: String) {
+        val t = transformer ?: return
+        val tmp = tmpActual
+        val cb = alFallar
+        limpiarMedia3()
+        runCatching { t.cancel() }
+        tmp?.delete()
+        cb?.invoke(motivo)
+    }
+
+    private fun saltar() {
+        if (!ocupado) return
+        val t = transformer
+        if (t != null) {
+            val tmp = tmpActual
+            limpiarMedia3()
+            runCatching { t.cancel() }
+            tmp?.delete()
+            fallo(nombreActual, "Saltado")
+            return
+        }
+        saltado = true
+        proceso?.destroy()
     }
 
     private fun rutaFFmpeg(uri: Uri, nombre: String, salida: String, errorMedia3: String) {
@@ -179,6 +251,11 @@ class MainActivity : ComponentActivity() {
                     return@runOnUiThread
                 }
                 val err = resultado.exceptionOrNull()
+                if (saltado) {
+                    intermedio.delete()
+                    fallo(nombre, "Saltado")
+                    return@runOnUiThread
+                }
                 if (err != null) {
                     intermedio.delete()
                     fallo(nombre, "$errorMedia3\n   FFmpeg: ${err.message}")
@@ -210,13 +287,26 @@ class MainActivity : ComponentActivity() {
             "-progress", "pipe:1", "-nostats",
             salida.absolutePath
         )
+        check(!saltado) { "Saltado" }
         val p = ProcessBuilder(cmd).redirectErrorStream(true).start()
         proceso = p
+        val ultimaLinea = AtomicLong(SystemClock.elapsedRealtime())
+        val trabado = java.util.concurrent.atomic.AtomicBoolean(false)
+        Thread {
+            while (p.isAlive) {
+                try { Thread.sleep(2000) } catch (_: InterruptedException) { break }
+                if (SystemClock.elapsedRealtime() - ultimaLinea.get() > 90_000) {
+                    trabado.set(true)
+                    p.destroy()
+                }
+            }
+        }.apply { isDaemon = true }.start()
         val ultimas = ArrayDeque<String>()
         val claveValor = Regex("^[a-z_0-9]+=.*")
         val duracion = Regex("Duration: (\\d+):(\\d+):(\\d+(?:\\.\\d+)?)")
         var durUs = 0L
         p.inputStream.bufferedReader().forEachLine { l ->
+            ultimaLinea.set(SystemClock.elapsedRealtime())
             if (l.startsWith("out_time_us=")) {
                 val t = l.substringAfter('=').toLongOrNull() ?: 0L
                 if (durUs > 0) {
@@ -239,6 +329,7 @@ class MainActivity : ComponentActivity() {
         }
         val codigo = p.waitFor()
         proceso = null
+        if (trabado.get()) throw RuntimeException("se trabó (90 s sin avanzar)")
         if (codigo != 0 || !salida.exists() || salida.length() == 0L) {
             throw RuntimeException(ultimas.joinToString("\n   ").ifBlank { "código $codigo" })
         }
@@ -293,6 +384,7 @@ class MainActivity : ComponentActivity() {
 
     private fun terminar() {
         ocupado = false
+        saltarBtn.visibility = android.view.View.GONE
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         if (total == 0) return
         estado.text = buildString {
@@ -319,7 +411,7 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         destruida = true
         handler.removeCallbacks(progreso)
-        transformer?.cancel()
+        runCatching { transformer?.cancel() }
         proceso?.destroy()
         io.shutdown()
         super.onDestroy()

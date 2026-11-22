@@ -28,6 +28,14 @@
         android:text="Elegir videos AVI"
         android:textSize="18sp" />
 
+    <Button
+        android:id="@+id/saltar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="Saltar este video"
+        android:visibility="gone" />
+
     <ProgressBar
         android:id="@+id/barra"
         style="?android:attr/progressBarStyleHorizontal"
